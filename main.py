@@ -2,11 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
-import openai
 import yfinance as yf
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv()
 
@@ -25,7 +25,8 @@ app.add_middleware(
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN")
-openai.api_key = OPENAI_API_KEY
+
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Commodity lookup
 commodities = {
@@ -70,11 +71,12 @@ JSON Format:
   ...
 ]
 """
-    response = openai.ChatCompletion.create(
+
+    response = client.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}]
     )
-    return response['choices'][0]['message']['content']
+    return response.choices[0].message.content
 
 def send_push_notification(title, body):
     if not EXPO_PUSH_TOKEN:
@@ -92,7 +94,8 @@ def analyze():
     ai_response = analyze_news(news)
     try:
         parsed = eval(ai_response)
-    except:
+    except Exception as e:
+        print("Error parsing AI response:", e)
         parsed = []
 
     enriched = []
