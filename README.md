@@ -1,2 +1,3 @@
-# ai-signal-backend
-AI bot signal
+# AI Signal Backend
+
+FastAPI backend to deliver AI trading signals.
