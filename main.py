@@ -6,7 +6,6 @@ import yfinance as yf
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-from openai import OpenAI
 
 load_dotenv()
 
@@ -25,8 +24,6 @@ app.add_middleware(
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Commodity lookup
 commodities = {
@@ -51,34 +48,13 @@ def get_price_history(symbol):
     return list(data['Close'].dropna())
 
 def analyze_news(news_snippets):
-    prompt = f"""
-Analyze the news headlines and recommend 6-8 high-confidence commodity trades.
-For each, provide:
-- commodity name
-- trend (up/down)
-- confidence % (like 89%)
-- reason
-- entry price
-- exit price
-- stop loss
-
-News:
-{''.join(f'- {n}\\n' for n in news_snippets)}
-
-JSON Format:
-[
-  {{"commodity": "gold", "trend": "up", "confidence": 91, "reason": "central bank demand", "entry": 2100, "exit": 2150, "stop_loss": 2079}},
-  ...
-]
-"""
+    # Mocked response to avoid calling OpenAI during testing
     return """
 [
   {"commodity": "gold", "trend": "up", "confidence": 91, "reason": "central bank demand", "entry": 2100, "exit": 2150, "stop_loss": 2079},
   {"commodity": "oil", "trend": "down", "confidence": 84, "reason": "oversupply concerns", "entry": 80, "exit": 74, "stop_loss": 83}
 ]
 """
-    )
-    return response.choices[0].message.content
 
 def send_push_notification(title, body):
     if not EXPO_PUSH_TOKEN:
