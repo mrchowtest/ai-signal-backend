@@ -99,4 +99,28 @@ def analyze():
     for rec in parsed[:8]:
         com = rec['commodity'].lower()
         symbol = commodities.get(com)
-        history
+        history = get_price_history(symbol) if symbol else []
+        pct_change = f"{((history[-1] - history[0]) / history[0]) * 100:.2f}%" if len(history) > 1 else "N/A"
+        signal = {
+            **rec,
+            "change_pct": pct_change,
+            "history": history,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        enriched.append(signal)
+
+        recent_signals.insert(0, signal)
+        if len(recent_signals) > 10:
+            recent_signals.pop()
+
+        if rec['confidence'] >= 80 and history and abs((history[-1] - history[0]) / history[0]) >= 0.02:
+            send_push_notification(
+                f"{rec['commodity'].capitalize()} {rec['trend']}trend detected",
+                f"{rec['reason']}. Entry: {rec['entry']}, Target: {rec['exit']}, Stop: {rec['stop_loss']}. Confidence: {rec['confidence']}%, 7d change: {pct_change}"
+            )
+
+    return {"signals": enriched}
+
+@app.get("/signals")
+def get_signals():
+    return {"signals": recent_signals}
