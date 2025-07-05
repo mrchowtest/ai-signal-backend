@@ -71,9 +71,12 @@ JSON Format:
   ...
 ]
 """
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}]
+    return """
+[
+  {"commodity": "gold", "trend": "up", "confidence": 91, "reason": "central bank demand", "entry": 2100, "exit": 2150, "stop_loss": 2079},
+  {"commodity": "oil", "trend": "down", "confidence": 84, "reason": "oversupply concerns", "entry": 80, "exit": 74, "stop_loss": 83}
+]
+"""
     )
     return response.choices[0].message.content
 
