@@ -1,6 +1,5 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import requests
 import yfinance as yf
 import os
@@ -28,16 +27,20 @@ EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Commodity lookup
+# Expanded Commodity lookup
 commodities = {
     "gold": "GC=F",
+    "silver": "SI=F",
     "oil": "CL=F",
+    "crude oil": "CL=F",
     "natural gas": "NG=F",
     "wheat": "ZW=F",
-    "copper": "HG=F"
+    "corn": "ZC=F",
+    "copper": "HG=F",
+    "platinum": "PL=F",
+    "palladium": "PA=F"
 }
 
-# Cache
 recent_signals = []
 
 def fetch_news():
@@ -47,8 +50,11 @@ def fetch_news():
     return [a["title"] + ". " + str(a.get("description", "")) for a in res.get("articles", [])][:15]
 
 def get_price_history(symbol):
-    data = yf.download(symbol, period="7d", interval="1d")
-    return list(data['Close'].dropna())
+    try:
+        data = yf.download(symbol, period="7d", interval="1d")
+        return list(data['Close'].dropna().astype(float))
+    except Exception:
+        return []
 
 def analyze_news(news_snippets):
     prompt = f"""
@@ -72,7 +78,7 @@ JSON Format:
 ]
 """
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo-0125",
+        model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}]
     )
     return response.choices[0].message.content
@@ -91,6 +97,7 @@ def send_push_notification(title, body):
 def analyze():
     news = fetch_news()
     ai_response = analyze_news(news)
+
     try:
         parsed = eval(ai_response)
     except Exception as e:
@@ -102,19 +109,10 @@ def analyze():
         com = rec['commodity'].lower()
         symbol = commodities.get(com)
         history = get_price_history(symbol) if symbol else []
-
-        # Safely calculate percentage change
-        try:
-            if len(history) > 1:
-                start = float(history[0])
-                end = float(history[-1])
-                pct_change = f"{((end - start) / start) * 100:.2f}%"
-            else:
-                pct_change = "N/A"
-        except Exception as e:
-            print("Error calculating pct_change:", e)
-            pct_change = "N/A"
-
+        pct_change = (
+            f"{((history[-1] - history[0]) / history[0]) * 100:.2f}%"
+            if len(history) > 1 else "N/A"
+        )
         signal = {
             **rec,
             "change_pct": pct_change,
@@ -127,7 +125,7 @@ def analyze():
         if len(recent_signals) > 10:
             recent_signals.pop()
 
-        if rec['confidence'] >= 80 and history and pct_change != "N/A" and abs((float(end) - float(start)) / float(start)) >= 0.02:
+        if rec['confidence'] >= 80 and len(history) > 1 and abs((history[-1] - history[0]) / history[0]) >= 0.02:
             send_push_notification(
                 f"{rec['commodity'].capitalize()} {rec['trend']}trend detected",
                 f"{rec['reason']}. Entry: {rec['entry']}, Target: {rec['exit']}, Stop: {rec['stop_loss']}. Confidence: {rec['confidence']}%, 7d change: {pct_change}"
