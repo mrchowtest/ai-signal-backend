@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import requests
 import yfinance as yf
 import os
@@ -11,7 +12,6 @@ load_dotenv()
 
 app = FastAPI()
 
-# Allow mobile app access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,53 +27,69 @@ EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Expanded Commodity lookup
-commodities = {
-    "gold": "GC=F",
-    "silver": "SI=F",
-    "oil": "CL=F",
-    "crude oil": "CL=F",
-    "natural gas": "NG=F",
-    "wheat": "ZW=F",
-    "corn": "ZC=F",
-    "copper": "HG=F",
-    "platinum": "PL=F",
-    "palladium": "PA=F"
+# Symbol lookup
+symbols = {
+    "XAUUSD": "GC=F",
+    "XAGUSD": "SI=F",
+    "BTCUSD": "BTC-USD",
+    "ETHUSD": "ETH-USD",
+    "EURUSD": None,
+    "GBPUSD": None,
+    "USDJPY": None,
+    "AUDUSD": None,
+    "USDCHF": None,
+    "USDCAD": None,
+    "NZDUSD": None
 }
 
 recent_signals = []
 
 def fetch_news():
     today = datetime.now().strftime("%Y-%m-%d")
-    url = f"https://newsapi.org/v2/everything?q=commodities&from={today}&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
+    url = f"https://newsapi.org/v2/everything?q=forex OR crypto OR gold&from={today}&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
     res = requests.get(url).json()
     return [a["title"] + ". " + str(a.get("description", "")) for a in res.get("articles", [])][:15]
 
 def get_price_history(symbol):
+    if not symbol:
+        return []
     try:
         data = yf.download(symbol, period="7d", interval="1d")
-        return list(data['Close'].dropna().astype(float))
-    except Exception:
+        return list(data['Close'].dropna())
+    except:
         return []
 
 def analyze_news(news_snippets):
     prompt = f"""
-Analyze the news headlines and recommend 6-8 high-confidence commodity trades.
-For each, provide:
-- commodity name
-- trend (up/down)
-- confidence % (like 89%)
+You are a financial trading assistant. Based on the news headlines below, generate 6–8 high-confidence trading signals ONLY for Forex currency pairs, precious metals (e.g., XAUUSD), and major crypto pairs (e.g., BTCUSD).
+Do NOT include commodities like corn, wheat, oil, etc.
+
+Only return pairs in standard format:
+Examples: EURUSD, GBPUSD, USDJPY, XAUUSD, XAUEUR, USDCHF, AUDUSD, NZDUSD, BTCUSD, ETHUSD
+
+For each trade, provide:
+- symbol
+- trend ("up" or "down")
+- confidence % (80–100)
 - reason
 - entry price
 - exit price
 - stop loss
 
 News:
-{''.join(f'- {n}\\n' for n in news_snippets)}
+{''.join(f'- {n}\n' for n in news_snippets)}
 
-JSON Format:
+JSON format only:
 [
-  {{"commodity": "gold", "trend": "up", "confidence": 91, "reason": "central bank demand", "entry": 2100, "exit": 2150, "stop_loss": 2079}},
+  {{
+    "symbol": "XAUUSD",
+    "trend": "up",
+    "confidence": 91,
+    "reason": "increased safe haven demand due to geopolitical tensions",
+    "entry": 1920,
+    "exit": 1975,
+    "stop_loss": 1905
+  }},
   ...
 ]
 """
@@ -97,7 +113,6 @@ def send_push_notification(title, body):
 def analyze():
     news = fetch_news()
     ai_response = analyze_news(news)
-
     try:
         parsed = eval(ai_response)
     except Exception as e:
@@ -106,17 +121,14 @@ def analyze():
 
     enriched = []
     for rec in parsed[:8]:
-        com = rec['commodity'].lower()
-        symbol = commodities.get(com)
-        history = get_price_history(symbol) if symbol else []
-        pct_change = (
-            f"{((history[-1] - history[0]) / history[0]) * 100:.2f}%"
-            if len(history) > 1 else "N/A"
-        )
+        symbol = rec['symbol'].upper()
+        yf_symbol = symbols.get(symbol)
+        history = get_price_history(yf_symbol)
+        pct_change = f"{((history[-1] - history[0]) / history[0]) * 100:.2f}%" if len(history) > 1 else "N/A"
         signal = {
             **rec,
             "change_pct": pct_change,
-            "history": history,
+            "history": history or [symbol],
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
         enriched.append(signal)
@@ -125,9 +137,9 @@ def analyze():
         if len(recent_signals) > 10:
             recent_signals.pop()
 
-        if rec['confidence'] >= 80 and len(history) > 1 and abs((history[-1] - history[0]) / history[0]) >= 0.02:
+        if rec['confidence'] >= 80 and history and abs((history[-1] - history[0]) / history[0]) >= 0.02:
             send_push_notification(
-                f"{rec['commodity'].capitalize()} {rec['trend']}trend detected",
+                f"{rec['symbol']} {rec['trend']}trend detected",
                 f"{rec['reason']}. Entry: {rec['entry']}, Target: {rec['exit']}, Stop: {rec['stop_loss']}. Confidence: {rec['confidence']}%, 7d change: {pct_change}"
             )
 
