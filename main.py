@@ -28,18 +28,17 @@ EXPO_PUSH_TOKEN = os.getenv("EXPO_PUSH_TOKEN")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Symbol lookup
-symbols = {
-    "XAUUSD": "GC=F",
-    "XAGUSD": "SI=F",
-    "BTCUSD": "BTC-USD",
-    "ETHUSD": "ETH-USD",
-    "EURUSD": None,
-    "GBPUSD": None,
-    "USDJPY": None,
-    "AUDUSD": None,
-    "USDCHF": None,
-    "USDCAD": None,
-    "NZDUSD": None
+commodities = {
+    "gold": "XAUUSD",
+    "silver": "XAGUSD",
+    "euro": "EURUSD",
+    "pound": "GBPUSD",
+    "bitcoin": "BTCUSD",
+    "ethereum": "ETHUSD",
+    "yen": "USDJPY",
+    "swiss franc": "USDCHF",
+    "aussie": "AUDUSD",
+    "canadian": "USDCAD"
 }
 
 recent_signals = []
@@ -113,22 +112,36 @@ def send_push_notification(title, body):
 def analyze():
     news = fetch_news()
     ai_response = analyze_news(news)
+
     try:
         parsed = eval(ai_response)
     except Exception as e:
-        print("Error parsing AI response:", e)
+        print("❌ Error parsing AI response:", e)
         parsed = []
 
     enriched = []
     for rec in parsed[:8]:
-        symbol = rec['symbol'].upper()
-        yf_symbol = symbols.get(symbol)
-        history = get_price_history(yf_symbol)
-        pct_change = f"{((history[-1] - history[0]) / history[0]) * 100:.2f}%" if len(history) > 1 else "N/A"
+        com = rec['commodity'].lower()
+        symbol = commodities.get(com)
+
+        history = get_price_history(symbol) if symbol else []
+
+        try:
+            # Ensure all values are float for calculation
+            history = [float(price) for price in history if isinstance(price, (float, int, str)) and price != '']
+        except Exception as e:
+            print(f"⚠️ Skipping history parse for {com}: {e}")
+            history = []
+
+        pct_change = (
+            f"{((history[-1] - history[0]) / history[0]) * 100:.2f}%"
+            if len(history) > 1 else "N/A"
+        )
+
         signal = {
             **rec,
             "change_pct": pct_change,
-            "history": history or [symbol],
+            "history": history,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
         enriched.append(signal)
@@ -137,11 +150,18 @@ def analyze():
         if len(recent_signals) > 10:
             recent_signals.pop()
 
-        if rec['confidence'] >= 80 and history and abs((history[-1] - history[0]) / history[0]) >= 0.02:
-            send_push_notification(
-                f"{rec['symbol']} {rec['trend']}trend detected",
-                f"{rec['reason']}. Entry: {rec['entry']}, Target: {rec['exit']}, Stop: {rec['stop_loss']}. Confidence: {rec['confidence']}%, 7d change: {pct_change}"
-            )
+        try:
+            if (
+                rec['confidence'] >= 80 and
+                history and
+                abs((history[-1] - history[0]) / history[0]) >= 0.02
+            ):
+                send_push_notification(
+                    f"{rec['commodity'].upper()} {rec['trend']}trend detected",
+                    f"{rec['reason']}. Entry: {rec['entry']}, Target: {rec['exit']}, Stop: {rec['stop_loss']}. Confidence: {rec['confidence']}%, 7d change: {pct_change}"
+                )
+        except Exception as e:
+            print(f"⚠️ Notification skipped due to error: {e}")
 
     return {"signals": enriched}
 
