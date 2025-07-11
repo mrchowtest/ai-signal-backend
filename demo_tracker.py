@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BACKEND_URL = os.getenv("BACKEND_URL")  # e.g., https://your-backend.onrender.com
+BACKEND_URL = os.getenv("BACKEND_URL")
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -46,13 +46,28 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"❌ Telegram error: {e}")
 
+def is_peak_session():
+    utc_hour = datetime.utcnow().hour
+    return (
+        23 <= utc_hour <= 23 or
+        0 <= utc_hour <= 6 or
+        7 <= utc_hour <= 15 or
+        12 <= utc_hour <= 20
+    )
+
 def main():
-    print(f"⏱️ Checking for signals at {datetime.utcnow().isoformat()}Z")
-    signals = fetch_signals()
-    for signal in signals:
-        if signal.get("entry_ready"):
-            msg = format_signal_message(signal)
-            send_telegram_message(msg)
+    print(f"⏱️ Checking at {datetime.utcnow().isoformat()}Z")
+    if not BACKEND_URL:
+        print("❌ BACKEND_URL not set. Check your .env or Render config.")
+        return
+    if is_peak_session():
+        signals = fetch_signals()
+        for signal in signals:
+            if signal.get("entry_ready"):
+                msg = format_signal_message(signal)
+                send_telegram_message(msg)
+    else:
+        print("⏸️ Outside of peak trading hours. Skipping analysis.")
 
 if __name__ == "__main__":
     main()
