@@ -36,7 +36,7 @@ def get_price_history(pair):
         response = requests.get(url)
         data = response.json()
         print(f"🔍 Fetching price for {pair}: {data}")
-        if data['result'] == 'success':
+        if data.get('result') == 'success':
             return data['rates'].get(quote)
     except Exception as e:
         print(f"⚠️ Error fetching price for {pair}: {e}")
@@ -59,14 +59,14 @@ def send_telegram_message(text: str):
     except Exception as e:
         print(f"⚠️ Telegram error: {e}")
 
-# === Function: Analyze and generate signals ===
+# === Route: Analyze signals ===
 @app.get("/analyze")
 def analyze_forex():
     prompt = (
         "Act as a professional Forex trader. Based on recent macroeconomic news and trends, "
         "generate high-confidence trading signals for pairs: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, EURGBP. "
-        "Include: forex pair, trend_direction (up/down), confidence_level (0-100), reason, entry_price, take_profit, stop_loss."
-        "Return data as valid Python list of dicts."
+        "Include: forex pair, trend_direction (up/down), confidence_level (0-100), reason, entry_price, take_profit, stop_loss. "
+        "Return as a valid Python list of dictionaries."
     )
 
     try:
@@ -76,23 +76,39 @@ def analyze_forex():
         )
         raw_text = response.choices[0].message.content
         print(f"🧠 AI raw response: {raw_text}")
-        signals = eval(raw_text)
+        try:
+            signals = eval(raw_text)
+        except Exception as e:
+            print(f"❌ Failed to parse AI response: {e}")
+            return {"error": "AI parsing failed"}, 500
+
     except Exception as e:
-        print(f"❌ Failed to get or parse AI response: {e}")
-        return {"error": "AI parsing failed"}
+        print(f"❌ OpenAI error: {e}")
+        return {"error": "Failed to get AI response"}, 500
 
     results = []
 
     for signal in signals:
-        pair = signal.get("pair")
+        if not isinstance(signal, dict):
+            print(f"⚠️ Invalid signal format skipped: {signal}")
+            continue
+
+        # Handle various key names for 'pair'
+        pair = signal.get("pair") or signal.get("forex_pair")
+        if not pair:
+            print(f"⚠️ Missing 'pair' in signal: {signal}")
+            continue
+
         entry_price = signal.get("entry_price")
         take_profit = signal.get("take_profit")
         stop_loss = signal.get("stop_loss")
         trend = signal.get("trend_direction", "").lower()
         action = "BUY" if trend == "up" else "SELL"
 
+        # Live price fetch
         live_price = get_price_history(pair)
         if not live_price:
+            print(f"⚠️ Could not get live price for {pair}")
             continue
 
         signal["action"] = action
@@ -100,13 +116,13 @@ def analyze_forex():
         signal["distance_to_entry"] = round(abs(entry_price - live_price), 5)
         signal["timestamp"] = datetime.utcnow().isoformat() + "Z"
 
-        # Entry readiness check
+        # Entry readiness
         if action == "BUY":
             signal["entry_ready"] = live_price >= entry_price
         else:
             signal["entry_ready"] = live_price <= entry_price
 
-        # Risk/reward calculation
+        # Risk/reward
         if take_profit and stop_loss:
             reward = abs(take_profit - entry_price)
             risk = abs(entry_price - stop_loss)
@@ -114,7 +130,7 @@ def analyze_forex():
 
         results.append(signal)
 
-        # Only send if ENTRY READY
+        # Send to Telegram if entry is ready
         if signal["entry_ready"]:
             message = (
                 f"🔔🔔🔔 *NEW SIGNAL* 🔔🔔🔔\n\n"
