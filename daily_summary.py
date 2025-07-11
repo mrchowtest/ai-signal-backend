@@ -1,26 +1,60 @@
 import os
-import requests
-from datetime import datetime, timezone
+import sqlite3
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+import requests
 
 load_dotenv()
 
-BACKEND_URL = os.getenv("BACKEND_URL")
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DB_NAME = "signals.db"
 
-def fetch_signals():
-    if not BACKEND_URL:
-        raise ValueError("Missing BACKEND_URL")
+def get_today_summary():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
 
-    url = f"{BACKEND_URL.rstrip('/')}/signals"
-    res = requests.get(url)
-    res.raise_for_status()
-    return res.json().get("signals", [])
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = now
 
-def send_telegram_message(message):
+    c.execute("""
+        SELECT pair, action, confidence_level, entry_price, live_price,
+               take_profit, stop_loss, timestamp, risk_reward_ratio
+        FROM signals
+        WHERE timestamp BETWEEN ? AND ?
+        ORDER BY timestamp ASC
+    """, (start.isoformat(), end.isoformat()))
+
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def format_summary(rows):
+    if not rows:
+        return "📊 *Daily Summary*\n\nNo entry-ready signals were logged today."
+
+    summary = ["📊 *Daily Signal Summary*\n"]
+    for row in rows:
+        (pair, action, confidence, entry, live, tp, sl, ts, rr) = row
+        delta = round(abs(live - entry), 5)
+        summary.append(
+            f"\n*Pair:* {pair}\n"
+            f"*Action:* {action}\n"
+            f"*Confidence:* {confidence}%\n"
+            f"*Entry:* {entry}\n"
+            f"*Live:* {live}\n"
+            f"*Delta:* {delta}\n"
+            f"*TP:* {tp} | *SL:* {sl}\n"
+            f"*R/R:* {rr}\n"
+            f"*Time:* {ts}\n"
+            f"{'-'*20}"
+        )
+    return "\n".join(summary)
+
+def send_to_telegram(message):
     if not TELEGRAM_API_KEY or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram credentials missing.")
+        print("❌ Telegram credentials missing.")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_API_KEY}/sendMessage"
@@ -29,39 +63,21 @@ def send_telegram_message(message):
         "text": message,
         "parse_mode": "Markdown"
     }
-    res = requests.post(url, json=payload)
-    if res.ok:
-        print("✅ Daily summary sent to Telegram.")
-    else:
-        print("❌ Telegram error:", res.text)
-
-def run():
-    now = datetime.now(timezone.utc)
-    today = now.date()
 
     try:
-        signals = fetch_signals()
-        today_signals = [s for s in signals if s.get("entry_ready") and s.get("timestamp", "").startswith(str(today))]
-
-        if not today_signals:
-            send_telegram_message("📭 *No entry-ready signals were triggered today.*")
-            return
-
-        summary_lines = [f"📊 *Daily Signal Summary for {today}*"]
-        for signal in today_signals:
-            pair = signal["pair"]
-            entry = signal["entry_price"]
-            live = signal["live_price"]
-            delta = round(float(live) - float(entry), 5)
-            summary_lines.append(
-                f"\n*{pair}* - {signal['action']} | 🎯 Entry: {entry} | 💰 Live: {live} | Δ {delta}"
-            )
-
-        summary = "\n".join(summary_lines)
-        send_telegram_message(summary)
-
+        r = requests.post(url, json=payload)
+        print(f"📬 Telegram sent: {r.text}")
     except Exception as e:
-        print(f"❌ Error creating daily summary: {e}")
+        print(f"⚠️ Telegram error: {e}")
+
+def main():
+    if datetime.now(timezone.utc).weekday() >= 5:
+        print("🛌 Weekend. No summary sent.")
+        return
+
+    summary_rows = get_today_summary()
+    message = format_summary(summary_rows)
+    send_to_telegram(message)
 
 if __name__ == "__main__":
-    run()
+    main()
