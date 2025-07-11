@@ -6,4 +6,4 @@ yfinance
 python-dotenv
 streamlit
 pandas
-sqlite3  # Not strictly needed but included for clarity
+
