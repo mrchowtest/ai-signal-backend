@@ -1,5 +1,6 @@
-import os
 import requests
+import os
+import sqlite3
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -8,95 +9,115 @@ load_dotenv()
 BACKEND_URL = os.getenv("BACKEND_URL")
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
 
-# Check if it's the weekend
-def is_weekend():
-    return datetime.now(timezone.utc).weekday() >= 5
+DB_NAME = "signals.db"
 
-# Check if within peak hours: Asia (00–03 UTC), London (07–10 UTC), New York (12–16 UTC)
-def is_peak_hour():
-    utc_hour = datetime.now(timezone.utc).hour
-    return utc_hour in list(range(0, 4)) + list(range(7, 11)) + list(range(12, 17))
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT,
+            action TEXT,
+            confidence_level INTEGER,
+            entry_price REAL,
+            live_price REAL,
+            take_profit REAL,
+            stop_loss REAL,
+            timestamp TEXT,
+            risk_reward_ratio REAL
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-# Send message to Telegram
-def send_telegram(text):
-    if not TELEGRAM_API_KEY or not TELEGRAM_CHAT_ID:
-        print("❌ Missing Telegram credentials.")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_API_KEY}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
+# --- Check if current time is within trading hours (weekdays + major sessions) ---
+def is_peak_hours():
+    now = datetime.now(timezone.utc)
+    if now.weekday() >= 5:
+        return False  # Weekend
+    hour = now.hour
+    return (0 <= hour < 3) or (6 <= hour < 10) or (12 <= hour < 16)  # Asia, London, NY
+
+# --- Fetch live signals from backend ---
+def fetch_signals():
+    if not BACKEND_URL:
+        print("❌ BACKEND_URL is not set.")
+        return []
     try:
-        res = requests.post(url, json=payload)
-        print(f"📤 Telegram response: {res.text}")
+        res = requests.get(f"{BACKEND_URL}/analyze", timeout=30)
+        res.raise_for_status()
+        data = res.json()
+        return data.get("signals", [])
     except Exception as e:
-        print(f"⚠️ Telegram error: {e}")
+        print(f"❌ Error fetching/analyzing signals: {e}")
+        return []
 
-# Log remaining Twelve Data usage
-def log_twelve_data_usage():
-    if not TWELVE_API_KEY:
-        print("⚠️ No Twelve Data API key provided.")
+# --- Optional: Track usage against OpenAI ---
+def track_openai_usage():
+    if not OPENAI_API_KEY:
         return
     try:
-        r = requests.get(f"https://api.twelvedata.com/usage?apikey={TWELVE_API_KEY}")
-        print(f"📊 Twelve Data usage: {r.json()}")
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        r = requests.get("https://api.openai.com/v1/dashboard/billing/usage", headers=headers)
+        usage = r.json()
+        print(f"💰 OpenAI usage info: {usage}")
     except Exception as e:
         print(f"⚠️ Usage tracking error: {e}")
 
-# Main logic
-def run():
+# --- Log entry-ready signal to SQLite ---
+def log_signal_to_db(signal):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO signals (
+                pair, action, confidence_level, entry_price, live_price,
+                take_profit, stop_loss, timestamp, risk_reward_ratio
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            signal.get("pair"),
+            signal.get("action"),
+            signal.get("confidence_level"),
+            signal.get("entry_price"),
+            signal.get("live_price"),
+            signal.get("take_profit"),
+            signal.get("stop_loss"),
+            signal.get("timestamp"),
+            signal.get("risk_reward_ratio")
+        ))
+        conn.commit()
+        conn.close()
+        print(f"✅ Logged signal for {signal.get('pair')} to DB.")
+    except Exception as e:
+        print(f"⚠️ DB logging error: {e}")
+
+# --- Run check ---
+def main():
     now = datetime.now(timezone.utc)
-    print(f"⏱️ Checking for signals at {now.isoformat()}")
+    print(f"\n⏱️ Checking for signals at {now.isoformat()}")
 
-    if is_weekend():
-        print("⛔ Weekend detected. Skipping.")
-        return
-
-    if not is_peak_hour():
+    if not is_peak_hours():
         print("⏸️ Outside peak trading hours. Skipping.")
         return
 
-    try:
-        response = requests.get(f"{BACKEND_URL}/analyze")
-        response.raise_for_status()
-        data = response.json()
+    signals = fetch_signals()
+    print(f"📈 Retrieved {len(signals)} signals.")
 
-        signals = data if isinstance(data, list) else data.get("signals", [])
-        print(f"📈 Retrieved {len(signals)} signals.")
+    entry_ready = [s for s in signals if s.get("entry_ready")]
+    print(f"✅ {len(entry_ready)} entry-ready signals sent to Telegram.")
 
-        sent_count = 0
+    if not TWELVE_API_KEY:
+        print("⚠️ No Twelve Data API key provided.")
 
-        for signal in signals:
-            if not signal.get("entry_ready"):
-                continue
+    for signal in entry_ready:
+        log_signal_to_db(signal)
 
-            message = (
-                f"🔔🔔🔔 *NEW SIGNAL* 🔔🔔🔔\n\n"
-                f"*Pair:* {signal['pair']}\n"
-                f"*Action:* {signal['action']}\n"
-                f"*Trend:* {signal['trend_direction'].title()}\n"
-                f"*Confidence:* {signal['confidence_level']}%\n"
-                f"*Entry Price:* {signal['entry_price']}\n"
-                f"*Live Price:* {signal['live_price']}\n"
-                f"*Distance to Entry:* {round(signal['distance_to_entry'], 5)}\n"
-                f"*Take Profit:* {signal['take_profit']}\n"
-                f"*Stop Loss:* {signal['stop_loss']}\n"
-                f"🟢 *Entry Ready:* ✅ YES"
-            )
-            send_telegram(message)
-            sent_count += 1
-
-        print(f"✅ {sent_count} entry-ready signals sent to Telegram.")
-
-    except Exception as e:
-        print(f"❌ Error fetching/analyzing signals: {e}")
-
-    # Log Twelve Data usage
-    log_twelve_data_usage()
+    track_openai_usage()
 
 if __name__ == "__main__":
-    run()
+    init_db()
+    main()

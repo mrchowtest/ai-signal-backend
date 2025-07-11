@@ -4,3 +4,6 @@ requests
 openai>=1.2.0,<2.0
 yfinance
 python-dotenv
+streamlit
+pandas
+sqlite3  # Not strictly needed but included for clarity
