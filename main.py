@@ -11,7 +11,7 @@ load_dotenv()
 
 app = FastAPI()
 
-# Allow cross-origin requests
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,29 +20,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Environment Variables
+# ENV VARS
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
 
 openai.api_key = OPENAI_API_KEY
 
-# === Function: Fetch price history ===
+# === Get live price using Twelve Data ===
 def get_price_history(pair):
+    if not TWELVE_API_KEY:
+        print("⚠️ No Twelve Data API key provided.")
+        return None
+
     base, quote = pair[:3].upper(), pair[3:].upper()
-    url = f"https://open.er-api.com/v6/latest/{base}"
-    print(f"📡 API URL: {url}")
+    symbol = f"{base}/{quote}"
+    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVE_API_KEY}"
+    print(f"📡 Price API: {url}")
+
     try:
         response = requests.get(url)
         data = response.json()
-        print(f"🔍 Fetching price for {pair}: {data}")
-        if data.get('result') == 'success':
-            return data['rates'].get(quote)
+        print(f"🔍 Price data for {pair}: {data}")
+        return float(data.get("price"))
     except Exception as e:
         print(f"⚠️ Error fetching price for {pair}: {e}")
-    return None
+        return None
 
-# === Function: Send to Telegram ===
+# === Telegram message ===
 def send_telegram_message(text: str):
     if not TELEGRAM_API_KEY or not TELEGRAM_CHAT_ID:
         print("❌ Missing Telegram credentials.")
@@ -59,7 +65,7 @@ def send_telegram_message(text: str):
     except Exception as e:
         print(f"⚠️ Telegram error: {e}")
 
-# === Route: Analyze signals ===
+# === Main analysis endpoint ===
 @app.get("/analyze")
 def analyze_forex():
     prompt = (
@@ -75,28 +81,22 @@ def analyze_forex():
             messages=[{"role": "user", "content": prompt}]
         )
         raw_text = response.choices[0].message.content
-        print(f"🧠 AI raw response: {raw_text}")
-        try:
-            signals = eval(raw_text)
-        except Exception as e:
-            print(f"❌ Failed to parse AI response: {e}")
-            return {"error": "AI parsing failed"}, 500
-
+        print(f"🧠 AI response:\n{raw_text}")
+        signals = eval(raw_text)
     except Exception as e:
-        print(f"❌ OpenAI error: {e}")
-        return {"error": "Failed to get AI response"}, 500
+        print(f"❌ Error parsing AI response: {e}")
+        return {"error": "AI parsing failed"}, 500
 
     results = []
 
     for signal in signals:
         if not isinstance(signal, dict):
-            print(f"⚠️ Invalid signal format skipped: {signal}")
+            print(f"⚠️ Skipping malformed signal: {signal}")
             continue
 
-        # Handle various key names for 'pair'
         pair = signal.get("pair") or signal.get("forex_pair")
         if not pair:
-            print(f"⚠️ Missing 'pair' in signal: {signal}")
+            print(f"⚠️ No 'pair' found in: {signal}")
             continue
 
         entry_price = signal.get("entry_price")
@@ -105,10 +105,8 @@ def analyze_forex():
         trend = signal.get("trend_direction", "").lower()
         action = "BUY" if trend == "up" else "SELL"
 
-        # Live price fetch
         live_price = get_price_history(pair)
         if not live_price:
-            print(f"⚠️ Could not get live price for {pair}")
             continue
 
         signal["action"] = action
@@ -116,13 +114,10 @@ def analyze_forex():
         signal["distance_to_entry"] = round(abs(entry_price - live_price), 5)
         signal["timestamp"] = datetime.utcnow().isoformat() + "Z"
 
-        # Entry readiness
-        if action == "BUY":
-            signal["entry_ready"] = live_price >= entry_price
-        else:
-            signal["entry_ready"] = live_price <= entry_price
+        signal["entry_ready"] = (
+            live_price >= entry_price if action == "BUY" else live_price <= entry_price
+        )
 
-        # Risk/reward
         if take_profit and stop_loss:
             reward = abs(take_profit - entry_price)
             risk = abs(entry_price - stop_loss)
@@ -130,7 +125,6 @@ def analyze_forex():
 
         results.append(signal)
 
-        # Send to Telegram if entry is ready
         if signal["entry_ready"]:
             message = (
                 f"🔔🔔🔔 *NEW SIGNAL* 🔔🔔🔔\n\n"
