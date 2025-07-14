@@ -10,7 +10,7 @@ load_dotenv()
 
 app = FastAPI()
 
-# CORS settings
+# CORS config
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,28 +19,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Environment Variables
+# ENV variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
+
 openai.api_key = OPENAI_API_KEY
 
-# === Fetch live price ===
+# === Fetch live price using Twelve Data ===
 def get_price_history(pair):
-    base, quote = pair[:3].upper(), pair[3:].upper()
-    url = f"https://open.er-api.com/v6/latest/{base}"
+    if not TWELVE_API_KEY:
+        print("❌ Twelve Data API key missing.")
+        return None
+    url = f"https://api.twelvedata.com/price?symbol={pair.upper()}&apikey={TWELVE_API_KEY}"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
         data = response.json()
-        return data.get("rates", {}).get(quote)
+        price = float(data["price"])
+        print(f"💱 Live price for {pair}: {price}")
+        return price
     except Exception as e:
-        print(f"⚠️ Price fetch error: {e}")
+        print(f"⚠️ Error fetching live price for {pair}: {e}")
         return None
 
-# === Telegram Notification ===
+# === Send to Telegram ===
 def send_telegram_message(text: str):
     if not TELEGRAM_API_KEY or not TELEGRAM_CHAT_ID:
-        print("❌ Missing Telegram credentials.")
+        print("❌ Telegram credentials missing.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_API_KEY}/sendMessage"
     payload = {
@@ -49,72 +56,82 @@ def send_telegram_message(text: str):
         "parse_mode": "Markdown"
     }
     try:
-        requests.post(url, json=payload)
+        r = requests.post(url, json=payload)
+        print(f"📬 Telegram sent: {r.text}")
     except Exception as e:
         print(f"⚠️ Telegram error: {e}")
 
-# === Analyze route ===
+# === Analyze Forex Signal Endpoint ===
 @app.get("/analyze")
 def analyze_forex():
     prompt = (
-        "Act as a professional Forex trader. Generate high-confidence signals for: "
-        "EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, EURGBP, XAUUSD. "
-        "Return a Python list of dicts with: pair, trend_direction, confidence_level, "
-        "entry_price, take_profit, stop_loss."
+        "Act as a professional Forex trader. Based on macroeconomic trends and recent news, "
+        "generate high-confidence trading signals for: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, EURGBP, XAUUSD. "
+        "Return a list of dictionaries with: pair, trend_direction (up/down), confidence_level (0-100), "
+        "reason, entry_price, take_profit, stop_loss."
     )
+
     try:
         response = openai.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}]
         )
         raw = response.choices[0].message.content
+        print("🧠 Raw response:", raw)
         signals = eval(raw)
     except Exception as e:
         print(f"❌ AI parsing error: {e}")
-        return {"error": "AI parsing failed"}
+        return {"error": "AI response parsing failed"}
 
     results = []
-    for s in signals:
-        if not isinstance(s, dict): continue
-        pair = s.get("pair")
-        if not pair: continue
 
-        trend = s.get("trend_direction", "").lower()
+    for signal in signals:
+        pair = signal.get("pair")
+        tp = signal.get("take_profit")
+        sl = signal.get("stop_loss")
+        trend = signal.get("trend_direction", "").lower()
+        confidence = signal.get("confidence_level")
+
         action = "BUY" if trend == "up" else "SELL"
-        entry_price = s.get("entry_price")
-        take_profit = s.get("take_profit")
-        stop_loss = s.get("stop_loss")
 
+        # Live price as entry price
         live_price = get_price_history(pair)
-        if not live_price: continue
+        if not live_price:
+            continue
 
-        s["action"] = action
-        s["live_price"] = round(live_price, 5)
-        s["distance_to_entry"] = round(abs(entry_price - live_price), 5)
-        s["timestamp"] = datetime.utcnow().isoformat() + "Z"
-        s["entry_ready"] = live_price >= entry_price if action == "BUY" else live_price <= entry_price
+        # Validate TP/SL logic
+        if action == "BUY" and not (tp > live_price and sl < live_price):
+            print(f"❌ TP/SL logic invalid for BUY on {pair}")
+            continue
+        if action == "SELL" and not (tp < live_price and sl > live_price):
+            print(f"❌ TP/SL logic invalid for SELL on {pair}")
+            continue
 
-        if take_profit and stop_loss:
-            r = abs(take_profit - entry_price)
-            risk = abs(entry_price - stop_loss)
-            s["risk_reward_ratio"] = round(r / risk, 2) if risk else None
+        signal["entry_price"] = round(live_price, 5)
+        signal["live_price"] = round(live_price, 5)
+        signal["action"] = action
+        signal["timestamp"] = datetime.utcnow().isoformat() + "Z"
+        signal["entry_ready"] = True  # Always ready because price is live
 
-        results.append(s)
+        # Risk/Reward
+        if tp and sl:
+            reward = abs(tp - live_price)
+            risk = abs(sl - live_price)
+            signal["risk_reward_ratio"] = round(reward / risk, 2) if risk else None
 
-        if s["entry_ready"]:
-            msg = (
-                f"🔔🔔🔔 *NEW SIGNAL* 🔔🔔🔔\n\n"
-                f"*Pair:* {pair}\n"
-                f"*Action:* {action}\n"
-                f"*Trend:* {trend.title()}\n"
-                f"*Confidence:* {s['confidence_level']}%\n"
-                f"*Entry Price:* {entry_price}\n"
-                f"*Live Price:* {s['live_price']}\n"
-                f"*Distance to Entry:* {s['distance_to_entry']}\n"
-                f"*Take Profit:* {take_profit}\n"
-                f"*Stop Loss:* {stop_loss}\n"
-                f"🟢 *Entry Ready:* ✅ YES"
-            )
-            send_telegram_message(msg)
+        # Message format
+        message = (
+            f"🔔 *LIVE SIGNAL ALERT* 🔔\n\n"
+            f"*Pair:* {pair}\n"
+            f"*Action:* {action}\n"
+            f"*Confidence:* {confidence}%\n"
+            f"*Live Entry:* {live_price}\n"
+            f"*Take Profit:* {tp}\n"
+            f"*Stop Loss:* {sl}\n"
+            f"*R/R:* {signal.get('risk_reward_ratio')}\n"
+            f"🧠 *Reason:* {signal.get('reason')}"
+        )
+        send_telegram_message(message)
+        results.append(signal)
 
     return {"signals": results}
